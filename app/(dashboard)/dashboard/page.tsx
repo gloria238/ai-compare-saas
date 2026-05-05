@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
@@ -18,9 +18,41 @@ interface HistoryItem {
   result: Record<string, unknown> | null;
 }
 
+// 负责检测支付成功参数并刷新 Pro 状态
+function ProStatusRefresher({
+  user,
+  setIsPro,
+  supabase,
+  router,
+}: {
+  user: User | null;
+  setIsPro: (val: boolean) => void;
+  supabase: ReturnType<typeof getSupabase>;
+  router: ReturnType<typeof useRouter>;
+}) {
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    const isProSuccess = searchParams.get("pro") === "success";
+    if (isProSuccess && user) {
+      const refreshPro = async () => {
+        const { data: profile } = await supabase
+          .from("users")
+          .select("is_pro")
+          .eq("id", user.id)
+          .single();
+        if (profile) setIsPro(profile.is_pro ?? false);
+        router.replace("/dashboard");
+      };
+      refreshPro();
+    }
+  }, [searchParams, user, supabase, router, setIsPro]);
+
+  return null; // 这个组件不渲染任何 UI
+}
+
 export default function DashboardPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const supabase = getSupabase();
 
   const [user, setUser] = useState<User | null>(null);
@@ -51,7 +83,6 @@ export default function DashboardPage() {
       }
 
       setUser(currentUser);
-      // 先重置 Pro 状态，防止残留
       setIsPro(false);
 
       const [profileRes, historyRes] = await Promise.all([
@@ -84,26 +115,7 @@ export default function DashboardPage() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // 🔥 关键：监听支付成功回调参数，主动刷新 Pro 状态
-  useEffect(() => {
-    const isProSuccess = searchParams.get("pro") === "success";
-    if (isProSuccess && user) {
-      const refreshPro = async () => {
-        const { data: profile } = await supabase
-          .from("users")
-          .select("is_pro")
-          .eq("id", user.id)
-          .single();
-        if (profile) setIsPro(profile.is_pro ?? false);
-        // 清除 URL 参数，避免重复触发
-        router.replace("/dashboard");
-      };
-      refreshPro();
-    }
-  }, [searchParams, user, supabase, router]);
 
   // 登录状态监听
   useEffect(() => {
@@ -115,7 +127,6 @@ export default function DashboardPage() {
     return () => subscription.unsubscribe();
   }, [supabase, router]);
 
-  // 手动刷新历史记录
   const fetchHistory = useCallback(async () => {
     if (!user) return;
     setLoadingHistory(true);
@@ -130,7 +141,6 @@ export default function DashboardPage() {
     setLoadingHistory(false);
   }, [user, supabase]);
 
-  // 执行对比
   const handleCompare = useCallback(async () => {
     if (!query || !user) return;
 
@@ -164,7 +174,6 @@ export default function DashboardPage() {
     }
   }, [query, user, isPro, fetchHistory]);
 
-  // 升级 Pro
   const handleUpgrade = async () => {
     try {
       const res = await fetch("/api/stripe/checkout", {
@@ -179,7 +188,6 @@ export default function DashboardPage() {
     }
   };
 
-  // 提取 winner
   function getWinner(result: HistoryItem["result"]): string | null {
     if (!result || typeof result !== "object" || Array.isArray(result)) return null;
     const obj = result as Record<string, unknown>;
@@ -187,7 +195,6 @@ export default function DashboardPage() {
     return null;
   }
 
-  // 提取 summary
   function getSummary(result: HistoryItem["result"]): string | null {
     if (!result || typeof result !== "object" || Array.isArray(result)) return null;
     const obj = result as Record<string, unknown>;
@@ -205,6 +212,11 @@ export default function DashboardPage() {
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50/30">
+      {/* 关键：使用 Suspense 包裹使用 useSearchParams 的子组件 */}
+      <Suspense fallback={null}>
+        <ProStatusRefresher user={user} setIsPro={setIsPro} supabase={supabase} router={router} />
+      </Suspense>
+
       {/* 导航栏 */}
       <nav className="sticky top-0 z-50 bg-white/70 backdrop-blur-md border-b border-slate-200/60 shadow-sm">
         <div className="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
@@ -223,9 +235,7 @@ export default function DashboardPage() {
                 <Crown size={14} /> Pro
               </button>
             )}
-            <span className="text-sm text-slate-600 hidden sm:inline">
-              {user?.email}
-            </span>
+            <span className="text-sm text-slate-600 hidden sm:inline">{user?.email}</span>
             <button
               onClick={async () => {
                 await supabase.auth.signOut();
