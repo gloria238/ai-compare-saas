@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
 import { checkLimit } from "@/lib/check-limit";
@@ -20,6 +20,7 @@ interface HistoryItem {
 
 export default function DashboardPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const supabase = getSupabase();
 
   const [user, setUser] = useState<User | null>(null);
@@ -50,7 +51,7 @@ export default function DashboardPage() {
       }
 
       setUser(currentUser);
-      // 🔒 关键：先硬重置为 false，防止上一个用户的 Pro 状态残留
+      // 先重置 Pro 状态，防止残留
       setIsPro(false);
 
       const [profileRes, historyRes] = await Promise.all([
@@ -65,7 +66,6 @@ export default function DashboardPage() {
 
       if (cancelled) return;
 
-      // 根据查询结果设置 isPro，任何错误都视为非 Pro
       if (profileRes.error) {
         console.error("查询 users 表出错：", profileRes.error);
         setIsPro(false);
@@ -81,14 +81,31 @@ export default function DashboardPage() {
     };
 
     init();
-
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 登录状态监听（登出时跳转）
+  // 🔥 关键：监听支付成功回调参数，主动刷新 Pro 状态
+  useEffect(() => {
+    const isProSuccess = searchParams.get("pro") === "success";
+    if (isProSuccess && user) {
+      const refreshPro = async () => {
+        const { data: profile } = await supabase
+          .from("users")
+          .select("is_pro")
+          .eq("id", user.id)
+          .single();
+        if (profile) setIsPro(profile.is_pro ?? false);
+        // 清除 URL 参数，避免重复触发
+        router.replace("/dashboard");
+      };
+      refreshPro();
+    }
+  }, [searchParams, user, supabase, router]);
+
+  // 登录状态监听
   useEffect(() => {
     const {
       data: { subscription },
