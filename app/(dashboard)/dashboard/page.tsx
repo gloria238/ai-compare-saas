@@ -11,7 +11,6 @@ import type { AIResponse } from "@/types/ai";
 import type { User } from "@supabase/supabase-js";
 import { Crown, LogOut } from "lucide-react";
 
-// 历史记录条目类型（增加 result 字段）
 interface HistoryItem {
   id: string;
   items: string;
@@ -33,7 +32,7 @@ export default function DashboardPage() {
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [isPro, setIsPro] = useState(false);
 
-  // 初始化
+  // 初始化用户、Pro状态、历史记录
   useEffect(() => {
     let cancelled = false;
 
@@ -51,12 +50,14 @@ export default function DashboardPage() {
       }
 
       setUser(currentUser);
+      // 🔒 关键：先硬重置为 false，防止上一个用户的 Pro 状态残留
+      setIsPro(false);
 
       const [profileRes, historyRes] = await Promise.all([
         supabase.from("users").select("is_pro").eq("id", currentUser.id).single(),
         supabase
           .from("comparisons")
-          .select("id, items, result, created_at") // 多取 result 字段
+          .select("id, items, result, created_at")
           .eq("user_id", currentUser.id)
           .order("created_at", { ascending: false })
           .limit(10),
@@ -64,7 +65,13 @@ export default function DashboardPage() {
 
       if (cancelled) return;
 
-      setIsPro(profileRes.data?.is_pro ?? false);
+      // 根据查询结果设置 isPro，任何错误都视为非 Pro
+      if (profileRes.error) {
+        console.error("查询 users 表出错：", profileRes.error);
+        setIsPro(false);
+      } else {
+        setIsPro(profileRes.data?.is_pro ?? false);
+      }
 
       if (!historyRes.error && historyRes.data) {
         setHistory(historyRes.data as HistoryItem[]);
@@ -81,7 +88,7 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 登录状态监听
+  // 登录状态监听（登出时跳转）
   useEffect(() => {
     const {
       data: { subscription },
@@ -91,7 +98,7 @@ export default function DashboardPage() {
     return () => subscription.unsubscribe();
   }, [supabase, router]);
 
-  // 手动刷新历史（对比成功后调用）
+  // 手动刷新历史记录
   const fetchHistory = useCallback(async () => {
     if (!user) return;
     setLoadingHistory(true);
@@ -155,7 +162,7 @@ export default function DashboardPage() {
     }
   };
 
-  // 从 result 中提取 winner
+  // 提取 winner
   function getWinner(result: HistoryItem["result"]): string | null {
     if (!result || typeof result !== "object" || Array.isArray(result)) return null;
     const obj = result as Record<string, unknown>;
@@ -163,7 +170,7 @@ export default function DashboardPage() {
     return null;
   }
 
-  // 从 result 中提取 summary
+  // 提取 summary
   function getSummary(result: HistoryItem["result"]): string | null {
     if (!result || typeof result !== "object" || Array.isArray(result)) return null;
     const obj = result as Record<string, unknown>;
@@ -250,7 +257,7 @@ export default function DashboardPage() {
         {loading && <LoadingSkeleton />}
         {!loading && data && <Result data={data} />}
 
-        {/* 历史记录区块 - 展示更多结论 */}
+        {/* 历史记录 */}
         <div className="mt-16">
           <h3 className="text-2xl font-bold mb-6">Recent comparisons</h3>
           {loadingHistory ? (
