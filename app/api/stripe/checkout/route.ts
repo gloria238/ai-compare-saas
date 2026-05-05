@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: "2026-04-22.dahlia", // 请与你的 Stripe 账户版本对齐
+  apiVersion: "2026-04-22.dahlia",
 });
 
 export async function POST(req: NextRequest) {
@@ -12,7 +12,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "UserId is required" }, { status: 400 });
     }
 
-    const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+    // 🔥 临时强制使用线上域名，确保支付后正确跳转
+    const baseUrl = "https://ai-compare-saas.vercel.app";
+    // 等环境变量问题彻底解决后，可恢复为：
+    // const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
@@ -32,8 +35,8 @@ export async function POST(req: NextRequest) {
       metadata: {
         userId,
       },
-      success_url: `${baseUrl}?pro=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl}?pro=cancelled`,
+      success_url: `${baseUrl}/dashboard?pro=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}/dashboard?pro=cancelled`,
     });
 
     return NextResponse.json({ url: session.url });
