@@ -1,0 +1,104 @@
+// app/(dashboard)/share/[id]/page.tsx
+import { notFound } from "next/navigation";
+import { getAdminSupabase } from "@/lib/supabase-admin";
+import type { AIResponse } from "@/types/ai";
+
+interface SharePageProps {
+  params: { id: string };
+}
+
+// 判断是否是结构化对比数据
+function isComparisonData(
+  data: unknown
+): data is { comparison: Record<string, Record<string, string>>; summary?: string; winner?: string } {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "comparison" in data
+  );
+}
+
+export default async function SharePage({ params }: SharePageProps) {
+  const { id } = params;
+  if (!id) notFound();
+
+  const supabase = getAdminSupabase();
+  const { data: comparisonRow, error } = await supabase
+    .from("comparisons")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (error || !comparisonRow) notFound();
+
+  const result = comparisonRow.result as unknown;
+
+  // 情况 1: 原始文本（解析失败时的兜底）
+  if (result && typeof result === "object" && "raw" in (result as object)) {
+    return (
+      <div className="min-h-screen bg-white p-8">
+        <h1 className="text-2xl font-bold mb-4">Shared Comparison</h1>
+        <div className="bg-red-50 p-4 rounded-lg text-red-700">
+          {(result as { raw: string }).raw}
+        </div>
+      </div>
+    );
+  }
+
+  // 情况 2: 完整的结构化对比（包含 summary 和 winner）
+  if (isComparisonData(result)) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50 p-8">
+        <h1 className="text-3xl font-bold text-center mb-8 bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
+          Shared Comparison
+        </h1>
+        <div className="max-w-5xl mx-auto">
+          {/* 总结建议 */}
+          {result.summary && (
+            <div className="bg-indigo-50 border border-indigo-200 p-6 rounded-2xl mb-8">
+              <p className="text-lg text-indigo-900 leading-relaxed">📊 {result.summary}</p>
+              {result.winner && (
+                <p className="mt-3 inline-flex items-center gap-2 bg-amber-100 text-amber-800 px-4 py-1.5 rounded-full text-sm font-semibold">
+                  🏆 Best choice: {result.winner}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* 对比卡片 */}
+          <div className="grid md:grid-cols-2 gap-6">
+            {Object.entries(result.comparison).map(([product, features]) => (
+              <div
+                key={product}
+                className="bg-white/70 backdrop-blur-sm rounded-2xl p-8 border border-slate-200/60 shadow-sm hover:shadow-xl transition-all duration-300 hover:-translate-y-1"
+              >
+                <h2 className="text-2xl font-bold mb-6 bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
+                  {product}
+                </h2>
+                <div className="space-y-4">
+                  {Object.entries(features).map(([key, value]) => (
+                    <div
+                      key={key}
+                      className="flex justify-between items-baseline border-b border-slate-100 pb-2"
+                    >
+                      <span className="text-slate-500 capitalize text-sm">{key}</span>
+                      <span className="font-semibold text-slate-800">{value}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 情况 3: 数据存在但格式异常
+  return (
+    <div className="min-h-screen bg-white p-8">
+      <h1 className="text-2xl font-bold mb-4">Shared Comparison</h1>
+      <p className="text-red-500">This comparison data is not available in the correct format.</p>
+    </div>
+  );
+}
