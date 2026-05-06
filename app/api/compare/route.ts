@@ -1,13 +1,17 @@
-import { NextResponse } from "next/server";
+// app/api/compare/route.ts
+import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
+import type { ProductComparison } from "@/types/ai";
 
+// DeepSeek v4 配置
 const ai = new OpenAI({
   apiKey: process.env.DEEPSEEK_API_KEY!,
   baseURL: "https://tb.api.mkeai.com/v1",
 });
 
-const supabase = createClient(
+// Supabase 服务端客户端（用于存储数据，使用 service key）
+const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_KEY!
 );
@@ -41,7 +45,6 @@ function buildComparison(products: unknown[]): Record<string, Record<string, str
         .filter((f): f is string => typeof f === "string")
         .join(", ");
     }
-    // 其他简单字段
     for (const [key, value] of Object.entries(obj)) {
       if (!["type", "name", "price", "features"].includes(key) && typeof value === "string") {
         features[key] = value;
@@ -54,12 +57,70 @@ function buildComparison(products: unknown[]): Record<string, Record<string, str
   return Object.keys(result).length > 0 ? result : null;
 }
 
-export async function POST(req: Request) {
+// 解析并转换 AI 响应
+function parseAndConvert(text: string): ProductComparison | { raw: string } {
+  let parsed: unknown;
   try {
-    const { query, userId } = await req.json();
-    if (!query || !userId) {
-      return NextResponse.json({ success: false, error: "Missing parameters" }, { status: 400 });
+    parsed = JSON.parse(text);
+  } catch {
+    const extracted = extractJSON(text);
+    try {
+      parsed = JSON.parse(extracted);
+    } catch {
+      return { raw: text };
     }
+  }
+
+  if (Array.isArray(parsed)) {
+    const comparison = buildComparison(parsed);
+    if (comparison) return comparison;
+  }
+
+  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    const maybeComparison = parsed as Record<string, unknown>;
+    if (Object.keys(maybeComparison).length > 0) {
+      return maybeComparison as ProductComparison;
+    }
+  }
+
+  return { raw: text };
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    // 从 Authorization 头获取 token，服务端验证用户身份
+    const authHeader = req.headers.get("Authorization")?.replace("Bearer ", "");
+    if (!authHeader) {
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+    }
+
+    // 使用 anon key 的客户端验证 token
+    const supabaseAnon = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    );
+    const { data: { user }, error: userError } = await supabaseAnon.auth.getUser(authHeader);
+    if (userError || !user) {
+      return NextResponse.json({ success: false, error: "Invalid token" }, { status: 401 });
+    }
+    const userId = user.id;
+
+    // 从请求体中获取 query
+    const body = await req.json();
+    const query = body.query;
+
+    if (!query) {
+      return NextResponse.json({ success: false, error: "Missing query" }, { status: 400 });
+    }
+
+    // ===== 🔧 新增：输入长度限制 =====
+    if (query.length > 200) {
+      return NextResponse.json(
+        { success: false, error: "Query too long. Please keep it under 200 characters." },
+        { status: 400 }
+      );
+    }
+    // ===== 长度限制结束 =====
 
     console.log("👉 calling AI...");
     const completion = await ai.chat.completions.create({
@@ -69,23 +130,10 @@ export async function POST(req: Request) {
         {
           role: "system",
           content:
-            `You are a product comparison AI. Return a single JSON object with the following structure:
-{
-  "products": [
-    {
-      "name": "Product Name",
-      "type": "Category (e.g. Flagship Smartphone)",
-      "price": "$999",
-      "features": ["6.8-inch display", "50MP camera"]
-    }
-  ],
-  "summary": "A short comparative conclusion (1-2 sentences).",
-  "winner": "Product Name (optional, only if one is clearly better overall)"
-}
-No additional text or explanation. Return valid JSON only.`
+            'You are a product comparison AI. Return a valid JSON array of 2-3 items. Each item must have "type" (the category name), "name", "price", and "features" array of strings. No explanation.',
         },
-        { role: "user", content: `Compare: ${query}` }
-      ]
+        { role: "user", content: `Compare: ${query}` },
+      ],
     });
 
     if (!completion.choices || completion.choices.length === 0) {
@@ -97,58 +145,17 @@ No additional text or explanation. Return valid JSON only.`
       throw new Error("AI returned HTML. Check baseURL or API key.");
     }
 
-    // 解析 JSON
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      const extracted = extractJSON(raw);
-      try {
-        parsed = JSON.parse(extracted);
-      } catch {
-        // 完全无法解析，返回原始文本
-        await supabase.from("comparisons").insert([{
-          user_id: userId,
-          items: query,
-          criteria: "AI",
-          result: { raw }
-        }]);
-        return NextResponse.json({ success: true, data: { raw } });
-      }
-    }
+    const result = parseAndConvert(raw);
 
-    // 提取 summary 和 winner
-    const summary = typeof (parsed as Record<string, unknown>)?.summary === "string"
-      ? (parsed as Record<string, unknown>).summary as string
-      : undefined;
-    const winner = typeof (parsed as Record<string, unknown>)?.winner === "string"
-      ? (parsed as Record<string, unknown>).winner as string
-      : undefined;
-
-    // 提取 products 并转换为 comparison
-    const products = (parsed as Record<string, unknown>)?.products;
-    const comparison = buildComparison(products as unknown[]);
-
-    if (!comparison) {
-      // products 缺失，也降级为 raw
-      await supabase.from("comparisons").insert([{
+    // 存入数据库（使用已验证的 userId）
+    await supabaseAdmin.from("comparisons").insert([
+      {
         user_id: userId,
         items: query,
         criteria: "AI",
-        result: { raw }
-      }]);
-      return NextResponse.json({ success: true, data: { raw } });
-    }
-
-    const result = { comparison, summary, winner };
-
-    // 存入数据库（只存结构化部分）
-    await supabase.from("comparisons").insert([{
-      user_id: userId,
-      items: query,
-      criteria: "AI",
-      result: result as unknown as Record<string, unknown>,
-    }]);
+        result: result as unknown as Record<string, unknown>,
+      },
+    ]);
 
     return NextResponse.json({ success: true, data: result });
   } catch (err: unknown) {

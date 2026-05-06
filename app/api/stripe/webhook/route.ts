@@ -1,3 +1,4 @@
+// app/api/stripe/webhook/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
@@ -8,7 +9,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  process.env.SUPABASE_SERVICE_KEY!
 );
 
 export async function POST(req: NextRequest) {
@@ -39,34 +40,49 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No userId" }, { status: 400 });
     }
 
-    const { data: existingUser, error: fetchError } = await supabaseAdmin
+    // ++++++++++ 幂等性检查 ++++++++++
+    // 1. 先查询该用户是否已处理过这个 session
+    const { data: existingUser } = await supabaseAdmin
       .from("users")
-      .select("id")
+      .select("id, stripe_session_id")
       .eq("id", userId)
       .maybeSingle();
 
-    if (fetchError) console.error("❌ Fetch user error:", fetchError);
+    if (existingUser?.stripe_session_id === session.id) {
+      // 已经处理过此 session，直接返回成功（幂等）
+      console.log("⏩ Session already processed, skipping");
+      return NextResponse.json({ received: true });
+    }
+    // ++++++++++ 检查结束 ++++++++++
 
+    // 如果用户记录不存在，插入；存在则更新 is_pro 并记录 session id
     if (!existingUser) {
       const { error: insertError } = await supabaseAdmin
         .from("users")
-        .insert({ id: userId, is_pro: true });
+        .insert({
+          id: userId,
+          is_pro: true,
+          stripe_session_id: session.id,  // 新增：记录 session id
+        });
       if (insertError) {
         console.error("❌ Failed to insert user:", insertError);
         return NextResponse.json({ error: insertError.message }, { status: 500 });
       }
+      console.log("🎉 New user inserted with Pro status, session:", session.id);
     } else {
       const { error: updateError } = await supabaseAdmin
         .from("users")
-        .update({ is_pro: true })
+        .update({
+          is_pro: true,
+          stripe_session_id: session.id,  // 更新 session id
+        })
         .eq("id", userId);
       if (updateError) {
         console.error("❌ Failed to update user:", updateError);
         return NextResponse.json({ error: updateError.message }, { status: 500 });
       }
+      console.log("🎉 User upgraded to Pro, session:", session.id);
     }
-
-    console.log("🎉 User upgraded to Pro:", userId);
   }
 
   return NextResponse.json({ received: true });

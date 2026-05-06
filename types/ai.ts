@@ -1,31 +1,20 @@
-export type AIResult = Record<
-  string, // 产品名，例如 iPhone
-  Record<
-    string, // feature，例如 price
-    string | number | null
-  >
->
+// types/ai.ts
 
-// export type ProductComparison = {
-//   [productName: string]: {
-//     [feature: string]: string
-//   }
-// }
-
-// export type AIResponse =
-//   | ProductComparison
-//   | {
-//       raw: string
-//     }
-
-    // 产品对比结构（每个产品 -> 特性键值对）
+// 基础的产品对比类型（每个产品名对应一个特性对象）
 export type ProductComparison = {
   [productName: string]: {
     [feature: string]: string;
   };
 };
 
-// AI 可能的三种响应
+// 结构化对比结果，包含比较数据、总结和胜出者
+export interface StructuredResult {
+  comparison: ProductComparison;
+  summary?: string;
+  winner?: string;
+}
+
+// AI 响应：可能是原始文本（解析失败）或结构化结果
 export type AIResponse =
-  | { raw: string }                              // 解析失败降级
-  | { comparison: ProductComparison; summary?: string; winner?: string }; // 正常结果
+  | { raw: string }
+  | StructuredResult;

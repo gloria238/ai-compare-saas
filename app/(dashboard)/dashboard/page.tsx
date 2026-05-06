@@ -1,3 +1,4 @@
+// app/(dashboard)/dashboard/page.tsx
 "use client";
 
 import { useEffect, useState, useCallback, Suspense } from "react";
@@ -7,7 +8,7 @@ import { getSupabase } from "@/lib/supabase";
 import { checkLimit } from "@/lib/check-limit";
 import Result from "@/components/compare/Result";
 import LoadingSkeleton from "@/components/compare/LoadingSkeleton";
-import type { AIResponse } from "@/types/ai";
+import type { AIResponse, StructuredResult } from "@/types/ai";
 import type { User } from "@supabase/supabase-js";
 import { Crown, LogOut } from "lucide-react";
 
@@ -15,7 +16,7 @@ interface HistoryItem {
   id: string;
   items: string;
   created_at: string;
-  result: Record<string, unknown> | null;
+  result: AIResponse | null; // 使用统一的类型
 }
 
 // 安全判断错误是否为 AbortError（避免使用 any）
@@ -28,23 +29,26 @@ function isAbortError(error: unknown): boolean {
   );
 }
 
-// 检测支付成功参数并刷新 Pro 状态
+// 检测支付成功/取消参数，刷新 Pro 状态或显示提示
 function ProStatusRefresher({
   user,
   setIsPro,
   supabase,
   router,
+  setInfoMessage,
 }: {
   user: User | null;
   setIsPro: (val: boolean) => void;
   supabase: ReturnType<typeof getSupabase>;
   router: ReturnType<typeof useRouter>;
+  setInfoMessage: (msg: string | null) => void;
 }) {
   const searchParams = useSearchParams();
 
   useEffect(() => {
-    const isProSuccess = searchParams.get("pro") === "success";
-    if (isProSuccess && user) {
+    const proAction = searchParams.get("pro");
+    if (proAction === "success" && user) {
+      // 支付成功，刷新 Pro 状态
       const refreshPro = async () => {
         const { data: profile } = await supabase
           .from("users")
@@ -55,8 +59,12 @@ function ProStatusRefresher({
         router.replace("/dashboard");
       };
       refreshPro();
+    } else if (proAction === "cancelled") {
+      // 用户取消支付，显示提示
+      setInfoMessage("You cancelled the upgrade. Feel free to try again anytime!");
+      router.replace("/dashboard");
     }
-  }, [searchParams, user, supabase, router, setIsPro]);
+  }, [searchParams, user, supabase, router, setIsPro, setInfoMessage]);
 
   return null;
 }
@@ -71,6 +79,7 @@ export default function DashboardPage() {
   const [data, setData] = useState<AIResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [isPro, setIsPro] = useState(false);
@@ -119,7 +128,7 @@ export default function DashboardPage() {
       }
 
       setUser(currentUser);
-      setIsPro(false); // 先重置
+      setIsPro(false);
 
       const [profileRes, historyRes] = await Promise.all([
         supabase
@@ -184,16 +193,21 @@ export default function DashboardPage() {
     setLoadingHistory(false);
   }, [user, supabase]);
 
-  // 执行对比
+  // 执行对比（携带 token）
   const handleCompare = useCallback(async () => {
     if (!query || !user) return;
 
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+    if (!token) {
+      setError("You must be logged in.");
+      return;
+    }
+
     if (!isPro) {
-      const allowed = await checkLimit(user.id);
+      const allowed = await checkLimit(user.id, token);
       if (!allowed) {
-        setError(
-          "Daily limit reached (5/day). Upgrade to Pro for unlimited comparisons."
-        );
+        setError("Daily limit reached (5/day). Upgrade to Pro for unlimited comparisons.");
         return;
       }
     }
@@ -203,8 +217,11 @@ export default function DashboardPage() {
     try {
       const res = await fetch("/api/compare", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, userId: user.id }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ query }),
       });
       const json = await res.json();
       if (json.success) {
@@ -218,14 +235,12 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }, [query, user, isPro, fetchHistory]);
+  }, [query, user, isPro, fetchHistory, supabase]);
 
   // 升级 Pro（携带 token）
   const handleUpgrade = async () => {
     try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
+      const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
       if (!token) {
         setError("You must be logged in to upgrade.");
@@ -247,22 +262,16 @@ export default function DashboardPage() {
     }
   };
 
-  // 提取 winner
+  // 提取 winner（类型安全）
   function getWinner(result: HistoryItem["result"]): string | null {
-    if (!result || typeof result !== "object" || Array.isArray(result))
-      return null;
-    const obj = result as Record<string, unknown>;
-    if (typeof obj.winner === "string") return obj.winner;
-    return null;
+    if (!result || "raw" in result) return null;
+    return (result as StructuredResult).winner ?? null;
   }
 
-  // 提取 summary
+  // 提取 summary（类型安全）
   function getSummary(result: HistoryItem["result"]): string | null {
-    if (!result || typeof result !== "object" || Array.isArray(result))
-      return null;
-    const obj = result as Record<string, unknown>;
-    if (typeof obj.summary === "string") return obj.summary;
-    return null;
+    if (!result || "raw" in result) return null;
+    return (result as StructuredResult).summary ?? null;
   }
 
   if (loadingUser) {
@@ -275,17 +284,16 @@ export default function DashboardPage() {
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50/30">
-      {/* 使用 Suspense 包裹 useSearchParams 的子组件 */}
       <Suspense fallback={null}>
         <ProStatusRefresher
           user={user}
           setIsPro={setIsPro}
           supabase={supabase}
           router={router}
+          setInfoMessage={setInfoMessage}
         />
       </Suspense>
 
-      {/* 导航栏 */}
       <nav className="sticky top-0 z-50 bg-white/70 backdrop-blur-md border-b border-slate-200/60 shadow-sm">
         <div className="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
           <Link
@@ -295,33 +303,25 @@ export default function DashboardPage() {
             AI Compare
           </Link>
           <div className="flex items-center gap-4">
-            {/* 根据 isPro 状态显示两种不同的 UI */}
             {isPro ? (
-              // 付费会员：显示 Pro 徽章（不可点击）
-              <div
-                className="flex items-center gap-1.5 rounded-full bg-amber-400/20 text-amber-700 px-3 py-1.5 text-sm font-semibold border border-amber-400/50 cursor-default"
-                title="You are a Pro member"
-              >
+              <div className="flex items-center gap-1.5 rounded-full bg-amber-400/20 text-amber-700 px-3 py-1.5 text-sm font-semibold border border-amber-400/50 cursor-default">
                 <Crown size={14} /> Pro
               </div>
             ) : (
-              // 免费用户：Upgrade to Pro 按钮
               <button
                 onClick={handleUpgrade}
-                className="flex items-center gap-2 rounded-full bg-gradient-to-r from-amber-400 to-amber-500 px-4 py-1.5 text-sm font-medium text-slate-900 hover:shadow-md transition"
+                className="flex items-center gap-2 rounded-full bg-gradient-to-r from-amber-400 to-amber-500 px-4 py-1.5 text-sm font-medium text-slate-900 hover:shadow-md transition cursor-pointer"
               >
                 <Crown size={14} /> Upgrade to Pro
               </button>
             )}
-            <span className="text-sm text-slate-600 hidden sm:inline">
-              {user?.email}
-            </span>
+            <span className="text-sm text-slate-600 hidden sm:inline">{user?.email}</span>
             <button
               onClick={async () => {
                 await supabase.auth.signOut();
                 router.push("/login");
               }}
-              className="p-2 rounded-full hover:bg-slate-100 transition"
+              className="p-2 rounded-full hover:bg-slate-100 transition cursor-pointer"
             >
               <LogOut size={18} className="text-slate-500" />
             </button>
@@ -330,11 +330,8 @@ export default function DashboardPage() {
       </nav>
 
       <div className="max-w-4xl mx-auto px-6 py-12 animate-fade-in-up">
-        <h2 className="text-4xl font-bold mb-8 text-center">
-          Compare anything instantly
-        </h2>
+        <h2 className="text-4xl font-bold mb-8 text-center">Compare anything instantly</h2>
 
-        {/* 输入区 */}
         <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-1 shadow-xl border border-slate-200/60 mb-8">
           <div className="flex items-center gap-2 bg-white rounded-xl p-1">
             <input
@@ -348,7 +345,7 @@ export default function DashboardPage() {
             <button
               onClick={handleCompare}
               disabled={loading || !query}
-              className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-medium hover:bg-indigo-700 disabled:opacity-50 transition-all hover:shadow-lg"
+              className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-medium hover:bg-indigo-700 disabled:opacity-50 transition-all hover:shadow-lg cursor-pointer"
             >
               {loading ? "Comparing..." : "Compare"}
             </button>
@@ -361,41 +358,35 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {infoMessage && (
+          <div className="bg-blue-50 border border-blue-200 text-blue-700 p-4 rounded-2xl mb-6 text-sm">
+            {infoMessage}
+          </div>
+        )}
+
         {loading && <LoadingSkeleton />}
         {!loading && data && <Result data={data} />}
 
-        {/* 历史记录 */}
         <div className="mt-16">
           <h3 className="text-2xl font-bold mb-6">Recent comparisons</h3>
           {loadingHistory ? (
             <p className="text-slate-500">Loading...</p>
           ) : history.length === 0 ? (
-            <p className="text-slate-500 italic">
-              Your comparisons will appear here.
-            </p>
+            <p className="text-slate-500 italic">Your comparisons will appear here.</p>
           ) : (
             <div className="space-y-4">
               {history.map((item) => {
                 const winner = getWinner(item.result);
                 const summary = getSummary(item.result);
                 return (
-                  <div
-                    key={item.id}
-                    className="bg-white/70 backdrop-blur-sm rounded-xl p-5 border border-slate-200/60 hover:shadow-md transition"
-                  >
+                  <div key={item.id} className="bg-white/70 backdrop-blur-sm rounded-xl p-5 border border-slate-200/60 hover:shadow-md transition">
                     <div className="flex flex-col gap-2">
-                      <h4 className="font-semibold text-slate-800 text-lg">
-                        {item.items}
-                      </h4>
+                      <h4 className="font-semibold text-slate-800 text-lg">{item.items}</h4>
                       {winner && (
-                        <div className="flex items-center gap-2 text-amber-600 text-sm font-medium">
-                          🏆 {winner}
-                        </div>
+                        <div className="flex items-center gap-2 text-amber-600 text-sm font-medium">🏆 {winner}</div>
                       )}
                       {summary && (
-                        <p className="text-sm text-slate-600 line-clamp-3">
-                          {summary}
-                        </p>
+                        <p className="text-sm text-slate-600 line-clamp-3">{summary}</p>
                       )}
                       <p className="text-xs text-slate-400 mt-1">
                         {new Date(item.created_at).toLocaleString("en-US", {
