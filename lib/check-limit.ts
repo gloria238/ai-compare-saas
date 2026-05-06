@@ -12,12 +12,12 @@ export async function checkLimit(userId: string): Promise<boolean> {
   if (user?.is_pro) return true;
 
   const today = new Date().toISOString().split("T")[0];
-
   const { count } = await supabase
     .from("comparisons")
     .select("*", { count: "exact", head: true })
     .eq("user_id", userId)
-    .gte("created_at", today);
+    .gte("created_at", today + "T00:00:00")
+    .lt("created_at", today + "T23:59:59");
 
   return (count ?? 0) < 5;
 }

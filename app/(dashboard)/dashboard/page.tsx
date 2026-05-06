@@ -18,7 +18,17 @@ interface HistoryItem {
   result: Record<string, unknown> | null;
 }
 
-// 负责检测支付成功参数并刷新 Pro 状态
+// 安全判断错误是否为 AbortError（避免使用 any）
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    (error as { name: string }).name === "AbortError"
+  );
+}
+
+// 检测支付成功参数并刷新 Pro 状态
 function ProStatusRefresher({
   user,
   setIsPro,
@@ -48,7 +58,7 @@ function ProStatusRefresher({
     }
   }, [searchParams, user, supabase, router, setIsPro]);
 
-  return null; // 这个组件不渲染任何 UI
+  return null;
 }
 
 export default function DashboardPage() {
@@ -65,15 +75,41 @@ export default function DashboardPage() {
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [isPro, setIsPro] = useState(false);
 
-  // 初始化用户、Pro状态、历史记录
+  // 初始化：带重试的 getUser，安全处理锁竞争
   useEffect(() => {
     let cancelled = false;
+    let retryCount = 0;
+    const maxRetries = 2;
+
+    const attemptGetUser = async (): Promise<User | null> => {
+      try {
+        const {
+          data: { user },
+          error,
+        } = await supabase.auth.getUser();
+        if (error) {
+          if (isAbortError(error) && retryCount < maxRetries) {
+            retryCount++;
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            return attemptGetUser();
+          }
+          console.error("Auth error:", error.message);
+          return null;
+        }
+        return user ?? null;
+      } catch (err: unknown) {
+        if (isAbortError(err) && retryCount < maxRetries) {
+          retryCount++;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          return attemptGetUser();
+        }
+        console.error("Unexpected auth error:", err);
+        return null;
+      }
+    };
 
     const init = async () => {
-      const {
-        data: { user: currentUser },
-      } = await supabase.auth.getUser();
-
+      const currentUser = await attemptGetUser();
       if (cancelled) return;
 
       if (!currentUser) {
@@ -83,10 +119,14 @@ export default function DashboardPage() {
       }
 
       setUser(currentUser);
-      setIsPro(false);
+      setIsPro(false); // 先重置
 
       const [profileRes, historyRes] = await Promise.all([
-        supabase.from("users").select("is_pro").eq("id", currentUser.id).single(),
+        supabase
+          .from("users")
+          .select("is_pro")
+          .eq("id", currentUser.id)
+          .single(),
         supabase
           .from("comparisons")
           .select("id, items, result, created_at")
@@ -112,9 +152,11 @@ export default function DashboardPage() {
     };
 
     init();
+
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 登录状态监听
@@ -127,6 +169,7 @@ export default function DashboardPage() {
     return () => subscription.unsubscribe();
   }, [supabase, router]);
 
+  // 手动刷新历史记录
   const fetchHistory = useCallback(async () => {
     if (!user) return;
     setLoadingHistory(true);
@@ -141,13 +184,16 @@ export default function DashboardPage() {
     setLoadingHistory(false);
   }, [user, supabase]);
 
+  // 执行对比
   const handleCompare = useCallback(async () => {
     if (!query || !user) return;
 
     if (!isPro) {
       const allowed = await checkLimit(user.id);
       if (!allowed) {
-        setError("Daily limit reached (5/day). Upgrade to Pro for unlimited comparisons.");
+        setError(
+          "Daily limit reached (5/day). Upgrade to Pro for unlimited comparisons."
+        );
         return;
       }
     }
@@ -174,29 +220,46 @@ export default function DashboardPage() {
     }
   }, [query, user, isPro, fetchHistory]);
 
+  // 升级 Pro（携带 token）
   const handleUpgrade = async () => {
     try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) {
+        setError("You must be logged in to upgrade.");
+        return;
+      }
+
       const res = await fetch("/api/stripe/checkout", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: user?.id }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
       });
       const { url } = await res.json();
       if (url) window.location.href = url;
+      else setError("No checkout URL returned");
     } catch {
       setError("Upgrade failed, please try again.");
     }
   };
 
+  // 提取 winner
   function getWinner(result: HistoryItem["result"]): string | null {
-    if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+    if (!result || typeof result !== "object" || Array.isArray(result))
+      return null;
     const obj = result as Record<string, unknown>;
     if (typeof obj.winner === "string") return obj.winner;
     return null;
   }
 
+  // 提取 summary
   function getSummary(result: HistoryItem["result"]): string | null {
-    if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+    if (!result || typeof result !== "object" || Array.isArray(result))
+      return null;
     const obj = result as Record<string, unknown>;
     if (typeof obj.summary === "string") return obj.summary;
     return null;
@@ -212,9 +275,14 @@ export default function DashboardPage() {
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50/30">
-      {/* 关键：使用 Suspense 包裹使用 useSearchParams 的子组件 */}
+      {/* 使用 Suspense 包裹 useSearchParams 的子组件 */}
       <Suspense fallback={null}>
-        <ProStatusRefresher user={user} setIsPro={setIsPro} supabase={supabase} router={router} />
+        <ProStatusRefresher
+          user={user}
+          setIsPro={setIsPro}
+          supabase={supabase}
+          router={router}
+        />
       </Suspense>
 
       {/* 导航栏 */}
@@ -227,15 +295,27 @@ export default function DashboardPage() {
             AI Compare
           </Link>
           <div className="flex items-center gap-4">
-            {!isPro && (
+            {/* 根据 isPro 状态显示两种不同的 UI */}
+            {isPro ? (
+              // 付费会员：显示 Pro 徽章（不可点击）
+              <div
+                className="flex items-center gap-1.5 rounded-full bg-amber-400/20 text-amber-700 px-3 py-1.5 text-sm font-semibold border border-amber-400/50 cursor-default"
+                title="You are a Pro member"
+              >
+                <Crown size={14} /> Pro
+              </div>
+            ) : (
+              // 免费用户：Upgrade to Pro 按钮
               <button
                 onClick={handleUpgrade}
                 className="flex items-center gap-2 rounded-full bg-gradient-to-r from-amber-400 to-amber-500 px-4 py-1.5 text-sm font-medium text-slate-900 hover:shadow-md transition"
               >
-                <Crown size={14} /> Pro
+                <Crown size={14} /> Upgrade to Pro
               </button>
             )}
-            <span className="text-sm text-slate-600 hidden sm:inline">{user?.email}</span>
+            <span className="text-sm text-slate-600 hidden sm:inline">
+              {user?.email}
+            </span>
             <button
               onClick={async () => {
                 await supabase.auth.signOut();

@@ -8,7 +8,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
 export async function POST(req: NextRequest) {
@@ -16,7 +16,6 @@ export async function POST(req: NextRequest) {
   const signature = req.headers.get("stripe-signature")!;
 
   let event: Stripe.Event;
-
   try {
     event = stripe.webhooks.constructEvent(
       payload,
@@ -33,51 +32,41 @@ export async function POST(req: NextRequest) {
     const session = event.data.object as Stripe.Checkout.Session;
     const userId = session.metadata?.userId;
 
-    console.log("✅ checkout.session.completed fired");
-    console.log("Session ID:", session.id);
-    console.log("Metadata userId:", userId);
+    console.log("✅ checkout.session.completed fired, userId:", userId);
 
     if (!userId) {
-      console.error("❌ No userId found in metadata");
+      console.error("❌ No userId found");
       return NextResponse.json({ error: "No userId" }, { status: 400 });
     }
 
-    // 检查用户是否存在
     const { data: existingUser, error: fetchError } = await supabaseAdmin
       .from("users")
       .select("id")
       .eq("id", userId)
       .maybeSingle();
 
-    if (fetchError) {
-      console.error("❌ Error fetching user:", fetchError);
-    }
+    if (fetchError) console.error("❌ Fetch user error:", fetchError);
 
     if (!existingUser) {
-      // 用户不存在：直接插入并标记为 Pro
-      console.log("⚠️ User record not found, inserting with is_pro = true");
       const { error: insertError } = await supabaseAdmin
         .from("users")
         .insert({ id: userId, is_pro: true });
-
       if (insertError) {
         console.error("❌ Failed to insert user:", insertError);
         return NextResponse.json({ error: insertError.message }, { status: 500 });
       }
-      console.log("🎉 Inserted new user with Pro status");
     } else {
-      // 用户存在：更新 is_pro
       const { error: updateError } = await supabaseAdmin
         .from("users")
         .update({ is_pro: true })
         .eq("id", userId);
-
       if (updateError) {
         console.error("❌ Failed to update user:", updateError);
         return NextResponse.json({ error: updateError.message }, { status: 500 });
       }
-      console.log("🎉 Updated user to Pro:", userId);
     }
+
+    console.log("🎉 User upgraded to Pro:", userId);
   }
 
   return NextResponse.json({ received: true });
