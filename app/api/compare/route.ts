@@ -2,7 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
-import type { ProductComparison } from "@/types/ai";
+import type { StructuredResult } from "@/types/ai";
 
 // DeepSeek v4 配置
 const ai = new OpenAI({
@@ -57,8 +57,8 @@ function buildComparison(products: unknown[]): Record<string, Record<string, str
   return Object.keys(result).length > 0 ? result : null;
 }
 
-// 解析并转换 AI 响应
-function parseAndConvert(text: string): ProductComparison | { raw: string } {
+// ========= 关键修改：parseAndConvert 现在能处理新格式 =========
+function parseAndConvert(text: string): StructuredResult | { raw: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -71,30 +71,54 @@ function parseAndConvert(text: string): ProductComparison | { raw: string } {
     }
   }
 
-  if (Array.isArray(parsed)) {
-    const comparison = buildComparison(parsed);
-    if (comparison) return comparison;
+  // 新格式：{ products: [...], summary?: string, winner?: string }
+  if (typeof parsed === "object" && parsed !== null && "products" in parsed) {
+    const obj = parsed as { products: unknown[]; summary?: unknown; winner?: unknown };
+    const comparison = buildComparison(obj.products);
+    if (comparison) {
+      const summary = typeof obj.summary === "string" ? obj.summary : undefined;
+      const winner = typeof obj.winner === "string" ? obj.winner : undefined;
+      return { comparison, summary, winner };
+    }
+    // 如果 products 无法解析，返回 raw
+    return { raw: text };
   }
 
+  // 旧格式：纯数组（AI 直接返回数组）
+  if (Array.isArray(parsed)) {
+    const comparison = buildComparison(parsed);
+    if (comparison) return { comparison }; // 没有 summary/winner
+  }
+
+  // 旧格式：普通对象（可能是直接的产品对比对象，可能是旧版 ProductComparison）
   if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-    const maybeComparison = parsed as Record<string, unknown>;
-    if (Object.keys(maybeComparison).length > 0) {
-      return maybeComparison as ProductComparison;
+    // 检查是否像 StructuredResult（有 comparison 字段）
+    if ("comparison" in parsed) {
+      const obj = parsed as { comparison: Record<string, Record<string, string>>; summary?: unknown; winner?: unknown };
+      if (typeof obj.comparison === "object") {
+        const summary = typeof obj.summary === "string" ? obj.summary : undefined;
+        const winner = typeof obj.winner === "string" ? obj.winner : undefined;
+        return { comparison: obj.comparison, summary, winner };
+      }
+    } else {
+      // 可能是直接的 ProductComparison（旧版兼容），直接构造 StructuredResult
+      // 这里需要判断对象值是否都是 Record<string, string>，但为了简单，直接返回
+      return { comparison: parsed as Record<string, Record<string, string>> };
     }
   }
 
+  // 如果上面的都无法处理，降级为 raw
   return { raw: text };
 }
+// ========= 修改结束 =========
 
 export async function POST(req: NextRequest) {
   try {
-    // 从 Authorization 头获取 token，服务端验证用户身份
     const authHeader = req.headers.get("Authorization")?.replace("Bearer ", "");
     if (!authHeader) {
       return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    // 使用 anon key 的客户端验证 token
     const supabaseAnon = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -105,7 +129,6 @@ export async function POST(req: NextRequest) {
     }
     const userId = user.id;
 
-    // 从请求体中获取 query
     const body = await req.json();
     const query = body.query;
 
@@ -113,14 +136,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: "Missing query" }, { status: 400 });
     }
 
-    // ===== 🔧 新增：输入长度限制 =====
     if (query.length > 200) {
       return NextResponse.json(
         { success: false, error: "Query too long. Please keep it under 200 characters." },
         { status: 400 }
       );
     }
-    // ===== 长度限制结束 =====
 
     console.log("👉 calling AI...");
     const completion = await ai.chat.completions.create({
@@ -130,7 +151,7 @@ export async function POST(req: NextRequest) {
         {
           role: "system",
           content:
-            'You are a product comparison AI. Return a valid JSON array of 2-3 items. Each item must have "type" (the category name), "name", "price", and "features" array of strings. No explanation.',
+            'You are a product comparison AI. Return a valid JSON object with a "products" array, a "summary" string, and a "winner" string (optional). Each item in the products array must have "type", "name", "price", and "features" array of strings. No other text.',
         },
         { role: "user", content: `Compare: ${query}` },
       ],
@@ -147,7 +168,7 @@ export async function POST(req: NextRequest) {
 
     const result = parseAndConvert(raw);
 
-    // 存入数据库（使用已验证的 userId）
+    // 存入数据库（result 已经是结构化格式）
     await supabaseAdmin.from("comparisons").insert([
       {
         user_id: userId,

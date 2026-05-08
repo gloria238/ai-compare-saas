@@ -97,6 +97,14 @@ export default function DashboardPage() {
           error,
         } = await supabase.auth.getUser();
         if (error) {
+          
+  if (error.message.includes("Invalid Refresh Token") || error.message.includes("Refresh Token Not Found")) {
+    await supabase.auth.signOut();
+    router.push("/login");
+    return null;
+  }
+  // 其他错误正常重试...
+
           if (isAbortError(error) && retryCount < maxRetries) {
             retryCount++;
             await new Promise((resolve) => setTimeout(resolve, 1000));
